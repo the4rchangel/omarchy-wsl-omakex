@@ -2,6 +2,8 @@
 
 Run **[Omarchy](https://omarchy.org)** (Arch + Hyprland) inside **WSL2**, with a Kali **Win-KeX**-style launcher: type `omakex` and the desktop opens in TigerVNC.
 
+![Omarchy desktop via omakex / TigerVNC on Windows](docs/images/omakex-desktop.png)
+
 Stock Hyprland cannot start on WSL (no real KMS). This project patches **Aquamarine** to use WSL’s **vgem** DRM node for GBM, runs a headless output + **wayvnc**, and ships every fix we hit on the way (cursor, DRM permissions, Omarchy shell, etc.).
 
 > Rendering is **CPU / llvmpipe** — fine for a daily desktop shell, not for games.
