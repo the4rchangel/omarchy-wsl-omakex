@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# omakex — Win-KeX-style launcher for Omarchy-on-WSL (Hyprland + wayvnc).
+# Bare `omakex` (like Kali `kex`) starts the session and opens the Windows desktop.
+set -euo pipefail
+
+# Hyprland refuses root. Re-exec as the desktop user (like Win-KeX).
+# Prefer: env → /etc/omakex.conf → known defaults
+if [[ -z "${OMAKEX_USER:-}" && -f /etc/omakex.conf ]]; then
+  # shellcheck disable=SC1091
+  source /etc/omakex.conf
+fi
+if [[ -z "${OMAKEX_USER:-}" ]]; then
+  if id omarchy &>/dev/null; then OMAKEX_USER=omarchy
+  elif id archangel &>/dev/null; then OMAKEX_USER=archangel
+  else OMAKEX_USER=omarchy
+  fi
+fi
+if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+  if ! id "$OMAKEX_USER" &>/dev/null; then
+    echo "omakex: refuse to run as root; create user '$OMAKEX_USER' or set OMAKEX_USER" >&2
+    exit 1
+  fi
+  echo "omakex: running as $OMAKEX_USER (Hyprland cannot run as root)"
+  exec runuser -u "$OMAKEX_USER" -- env \
+    XDG_RUNTIME_DIR="/run/user/$(id -u "$OMAKEX_USER")" \
+    HOME="$(getent passwd "$OMAKEX_USER" | cut -d: -f6)" \
+    USER="$OMAKEX_USER" LOGNAME="$OMAKEX_USER" \
+    "$0" "$@"
+fi
+
+DISPLAY_NUM="${OMAKEX_DISPLAY:-1}"          # VNC display :1 → port 5901
+VNC_PORT=$((5900 + DISPLAY_NUM))
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR" || true
+HYPR_LOG="${XDG_RUNTIME_DIR}/omakex-hyprland.log"
+WAYVNC_LOG="${XDG_RUNTIME_DIR}/omakex-wayvnc.log"
+PIDDIR="${XDG_RUNTIME_DIR}/omakex"
+mkdir -p "$PIDDIR"
+
+# Default: open Windows viewer (KeX behavior). Set OMAKEX_NOWIN=1 or pass --nowin for server-only.
+OPEN_WIN=1
+
+usage() {
+  cat <<EOF
+Usage: omakex [command] [options]
+
+  (no args)     Start session and open the Windows desktop (like Kali kex)
+  start         Same as no args
+  stop          Stop omakex session
+  status        Show PIDs / ports
+  kill          Force-kill session processes
+  win           Just (re)open the Windows VNC viewer
+
+Options:
+  --nowin, -s   Start server only (do not open Windows viewer)
+  --win-client  Force open Windows viewer (default for start)
+  -h, --help    This help
+
+Env:
+  OMAKEX_VGEM=1              Aquamarine vgem DRM fd (default: 1)
+  OMAKEX_DRM_CARD=/dev/dri/card0
+  OMAKEX_DISPLAY=1           VNC display number → port 5900+N
+  OMAKEX_GEOMETRY=1920x1080
+  OMAKEX_NOWIN=1             Same as --nowin
+EOF
+}
+
+need_cmd() { command -v "$1" >/dev/null || { echo "missing: $1" >&2; exit 1; }; }
+
+is_running() {
+  [[ -f "$PIDDIR/hyprland.pid" ]] && kill -0 "$(cat "$PIDDIR/hyprland.pid")" 2>/dev/null
+}
+
+wait_for_port() {
+  local i
+  for i in $(seq 1 40); do
+    if ss -tln 2>/dev/null | grep -q ":${VNC_PORT} "; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+start_session() {
+  need_cmd Hyprland
+  need_cmd wayvnc
+  export OMAKEX_VGEM="${OMAKEX_VGEM:-1}"
+  export AQ_WSL_VGEM="${AQ_WSL_VGEM:-1}"
+  export OMAKEX_DRM_CARD="${OMAKEX_DRM_CARD:-/dev/dri/card0}"
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  mkdir -p "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR" || true
+  HYPR_LOG="${XDG_RUNTIME_DIR}/omakex-hyprland.log"
+  WAYVNC_LOG="${XDG_RUNTIME_DIR}/omakex-wayvnc.log"
+  PIDDIR="${XDG_RUNTIME_DIR}/omakex"
+  mkdir -p "$PIDDIR"
+
+  if is_running; then
+    echo "session already running (pid $(cat "$PIDDIR/hyprland.pid"))"
+    return 0
+  fi
+
+  # WSL often recreates /dev/dri with odd group IDs; ensure we can open vgem.
+  if [[ ! -r "$OMAKEX_DRM_CARD" ]] || [[ ! -w "$OMAKEX_DRM_CARD" ]]; then
+    if command -v sudo >/dev/null; then
+      sudo setfacl -m "u:$(id -un):rw" "$OMAKEX_DRM_CARD" /dev/dri/renderD128 2>/dev/null \
+        || sudo chmod a+rw "$OMAKEX_DRM_CARD" /dev/dri/renderD128 2>/dev/null \
+        || true
+    fi
+  fi
+  if [[ ! -r "$OMAKEX_DRM_CARD" ]]; then
+    echo "cannot read $OMAKEX_DRM_CARD — add user to video/render or: sudo chmod a+rw /dev/dri/*" >&2
+  fi
+
+  if command -v seatd >/dev/null && [[ ! -S /run/seatd.sock ]]; then
+    if command -v sudo >/dev/null; then
+      sudo seatd -g video >/tmp/omakex-seatd.log 2>&1 &
+    else
+      seatd -g video >/tmp/omakex-seatd.log 2>&1 &
+    fi
+    echo $! >"$PIDDIR/seatd.pid"
+    sleep 0.3
+  fi
+
+  # Session bus required by Omarchy quickshell (notifications, tray, etc.)
+  if [[ ! -S "${XDG_RUNTIME_DIR}/bus" ]] && command -v dbus-daemon >/dev/null; then
+    dbus-daemon --session --address="unix:path=${XDG_RUNTIME_DIR}/bus" --nofork \
+      >"${XDG_RUNTIME_DIR}/omakex-dbus.log" 2>&1 &
+    echo $! >"$PIDDIR/dbus.pid"
+    sleep 0.2
+  fi
+  export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+
+  local geom="${OMAKEX_GEOMETRY:-1920x1080}"
+  export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
+  export PATH="${OMARCHY_PATH}/bin:${PATH}"
+
+  # Prefer full Omarchy Lua desktop; fall back to minimal conf if missing.
+  local conf=""
+  if [[ -f "$HOME/.config/hypr/hyprland.lua" && -d "$OMARCHY_PATH/default/hypr" ]]; then
+    mkdir -p "$HOME/.config/hypr"
+    # WSL/VNC headless monitor (scale 1 — not Omarchy's laptop GDK_SCALE=2)
+    cat >"$HOME/.config/hypr/monitors.lua" <<EOF
+-- generated by omakex for WSL headless / wayvnc — do not edit by hand
+hl.env("GDK_SCALE", "1")
+hl.monitor({ output = "HEADLESS-1", mode = "${geom}@60", position = "0x0", scale = 1 })
+EOF
+    # Headless/vgem cannot composite HW cursors → black square under wayvnc
+    local look="$HOME/.config/hypr/looknfeel.lua"
+    if [[ -f "$look" ]] && ! grep -q 'no_hardware_cursors' "$look"; then
+      cat >>"$look" <<'LUA'
+
+-- omakex/WSL: headless+wayvnc cannot composite hardware cursors (black square).
+hl.config({
+  cursor = {
+    no_hardware_cursors = true,
+  },
+})
+LUA
+    fi
+    conf="$HOME/.config/hypr/hyprland.lua"
+  else
+    conf="$PIDDIR/hyprland.conf"
+    cat >"$conf" <<EOF
+# generated by omakex — Omarchy not installed; bare Hyprland
+debug:disable_logs = false
+monitor = HEADLESS-1,${geom}@60,0x0,1
+exec-once = hyprctl output create headless HEADLESS-1
+exec-once = sleep 0.5 && wayvnc -r -o HEADLESS-1 127.0.0.1 ${VNC_PORT}
+EOF
+    echo "warning: Omarchy desktop not found — install the 'omarchy' package for bar/dock/themes" >&2
+  fi
+
+  echo "starting Omarchy desktop…"
+  nohup env -u WAYLAND_DISPLAY -u DISPLAY -u WAYLAND_SOCKET \
+    OMAKEX_VGEM=1 AQ_WSL_VGEM=1 OMAKEX_DRM_CARD="${OMAKEX_DRM_CARD}" \
+    OMARCHY_PATH="$OMARCHY_PATH" \
+    PATH="$PATH" \
+    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+    XDG_CURRENT_DESKTOP=Hyprland \
+    Hyprland -c "$conf" >"$HYPR_LOG" 2>&1 &
+  echo $! >"$PIDDIR/hyprland.pid"
+  sleep 3
+
+  if ! is_running; then
+    echo "Hyprland failed to stay up — see $HYPR_LOG" >&2
+    tail -40 "$HYPR_LOG" >&2 || true
+    exit 1
+  fi
+
+  local his wl
+  his="$(ls -t "${XDG_RUNTIME_DIR}/hypr/" 2>/dev/null | head -1 || true)"
+  wl="wayland-0"
+  [[ -S "${XDG_RUNTIME_DIR}/wayland-1" && ! -S "${XDG_RUNTIME_DIR}/wayland-0" ]] && wl="wayland-1"
+  [[ -S "${XDG_RUNTIME_DIR}/wayland-0" ]] && wl="wayland-0"
+
+  if [[ -n "$his" ]]; then
+    HYPRLAND_INSTANCE_SIGNATURE="$his" hyprctl output create headless HEADLESS-1 >/dev/null 2>&1 || true
+    sleep 0.5
+    local out="HEADLESS-1"
+    if ! HYPRLAND_INSTANCE_SIGNATURE="$his" hyprctl monitors 2>/dev/null | grep -q "Monitor HEADLESS"; then
+      out="$(HYPRLAND_INSTANCE_SIGNATURE="$his" hyprctl monitors -j 2>/dev/null | sed -n 's/.*"name": "\([^"]*\)".*/\1/p' | head -1)"
+      out="${out:-FALLBACK}"
+    fi
+    if ! ss -tln 2>/dev/null | grep -q ":${VNC_PORT} "; then
+      HYPRLAND_INSTANCE_SIGNATURE="$his" \
+        WAYLAND_DISPLAY="$wl" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        nohup wayvnc -r -o "$out" 127.0.0.1 "${VNC_PORT}" >"$WAYVNC_LOG" 2>&1 &
+      echo $! >"$PIDDIR/wayvnc.pid"
+    fi
+  fi
+
+  if ! wait_for_port; then
+    echo "wayvnc did not bind :${VNC_PORT} — see $WAYVNC_LOG / $HYPR_LOG" >&2
+    exit 1
+  fi
+  echo "desktop ready on 127.0.0.1:${VNC_PORT}"
+}
+
+stop_session() {
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  PIDDIR="${XDG_RUNTIME_DIR}/omakex"
+  for f in hyprland wayvnc seatd dbus; do
+    if [[ -f "$PIDDIR/$f.pid" ]]; then
+      kill "$(cat "$PIDDIR/$f.pid")" 2>/dev/null || true
+      rm -f "$PIDDIR/$f.pid"
+    fi
+  done
+  pkill -u "$(id -un)" -x Hyprland 2>/dev/null || true
+  pkill -u "$(id -un)" -x wayvnc 2>/dev/null || true
+  echo "stopped"
+}
+
+status_session() {
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  PIDDIR="${XDG_RUNTIME_DIR}/omakex"
+  if is_running; then
+    echo "running hyprland.pid=$(cat "$PIDDIR/hyprland.pid") port=${VNC_PORT}"
+  else
+    echo "stopped"
+  fi
+  ss -tlnp 2>/dev/null | grep ":${VNC_PORT} " || true
+}
+
+# Convert a /mnt/c/... path to a Windows path for cmd.exe /c start
+to_win_path() {
+  local p="$1"
+  if command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$p"
+    return
+  fi
+  p="${p#/mnt/c}"
+  p="${p//\//\\}"
+  echo "C:${p}"
+}
+
+find_vnc_viewer() {
+  local exe
+  for exe in \
+    "/mnt/c/Program Files/TigerVNC/vncviewer.exe" \
+    "/mnt/c/Program Files (x86)/TigerVNC/vncviewer.exe" \
+    "/mnt/c/Program Files/TightVNC/tvnviewer.exe" \
+    "/mnt/c/Program Files (x86)/TightVNC/tvnviewer.exe" \
+    "/mnt/c/Program Files/RealVNC/VNC Viewer/vncviewer.exe" \
+    "/mnt/c/Program Files (x86)/RealVNC/VNC Viewer/vncviewer.exe" \
+    "/mnt/c/Program Files/uvnc bvba/UltraVNC/vncviewer.exe" \
+    "${OMAKEX_VNCVIEWER:-}"; do
+    [[ -n "$exe" && -f "$exe" ]] && { echo "$exe"; return 0; }
+  done
+  # Local AppData installs (winget / user TigerVNC)
+  local hit
+  hit="$(ls /mnt/c/Users/*/AppData/Local/Programs/TigerVNC/vncviewer.exe 2>/dev/null | head -1 || true)"
+  [[ -n "$hit" && -f "$hit" ]] && { echo "$hit"; return 0; }
+  return 1
+}
+
+win_client() {
+  local exe winpath
+  if ! exe="$(find_vnc_viewer)"; then
+    cat >&2 <<EOF
+No Windows VNC viewer found.
+
+Install TigerVNC Viewer on Windows, then re-run: omakex
+
+  winget install TigerVNC.TigerVNC
+
+Or set OMAKEX_VNCVIEWER to the .exe path.
+Server is up at localhost:${VNC_PORT} if you connect manually.
+EOF
+    return 1
+  fi
+
+  winpath="$(to_win_path "$exe")"
+  # KeX-style: pop a Windows window via cmd start (detached from this TTY)
+  if command -v cmd.exe >/dev/null 2>&1; then
+    # TigerVNC accepts host:display (5900+display) — use display num like Win-KeX
+    cmd.exe /c start "" "$winpath" "127.0.0.1:${DISPLAY_NUM}" >/dev/null 2>&1 &
+  else
+    "$exe" "127.0.0.1:${DISPLAY_NUM}" >/dev/null 2>&1 &
+  fi
+  echo "opened Windows desktop viewer → 127.0.0.1:${DISPLAY_NUM} ($exe)"
+}
+
+# Parse args (KeX-like: bare invocation opens desktop)
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --nowin|-s) OPEN_WIN=0; shift ;;
+    --win-client|--win) OPEN_WIN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+set -- "${args[@]+"${args[@]}"}"
+
+if [[ "${OMAKEX_NOWIN:-0}" == "1" ]]; then
+  OPEN_WIN=0
+fi
+
+cmd="${1:-start}"
+shift || true
+
+case "$cmd" in
+  start|"")
+    start_session
+    if [[ "$OPEN_WIN" == "1" ]]; then
+      win_client || true
+    else
+      echo "server-only; connect to localhost:${VNC_PORT} or run: omakex win"
+    fi
+    ;;
+  stop) stop_session ;;
+  kill) stop_session ;;
+  status) status_session ;;
+  win) win_client ;;
+  *) usage; exit 1 ;;
+esac

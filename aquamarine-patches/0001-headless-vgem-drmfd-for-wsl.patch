@@ -1,0 +1,86 @@
+From: omakex <omakex@local>
+Subject: [PATCH] headless: use vgem DRM fd as allocator source (WSL/omakex)
+
+On WSL2, vgem exposes /dev/dri/card0 with working GBM + PRIME, but
+CHeadlessBackend::drmFD() returned -1 so CBackend never created a
+CGBMAllocator ("no allocator available").
+
+When OMAKEX_VGEM=1 (or AQ_WSL_VGEM=1), open the primary DRM node and
+return it from drmFD()/drmRenderNodeFD() so headless outputs can render
+via GBM (typically llvmpipe).
+
+---
+ src/backend/Headless.cpp | 80 ++++++++++++++++++++++++++++++++++++++++-
+ src/backend/Headless.hpp |  4 +++
+ 2 files changed, 82 insertions(+), 2 deletions(-)
+
+diff --git a/src/backend/Headless.hpp b/src/backend/Headless.hpp
+index 1111111..2222222 100644
+--- a/src/backend/Headless.hpp
++++ b/src/backend/Headless.hpp
+@@ -40,6 +40,10 @@ class CHeadlessBackend : public IBackendImplementation {
+         std::vector timers;
+         Hyprutils::OS::CFileDescriptor timerfd;
+     } timers;
++
++    // omakex/WSL: vgem (or other) DRM fd used only for GBM allocator
++    int m_drmFD         = -1;
++    int m_drmRenderFD   = -1;
+ };
+ 
+ }; // namespace Aquamarine
+diff --git a/src/backend/Headless.cpp b/src/backend/Headless.cpp
+index 1111111..2222222 100644
+--- a/src/backend/Headless.cpp
++++ b/src/backend/Headless.cpp
+@@ -1,6 +1,10 @@
++#include <cstdlib>
++#include <fcntl.h>
++#include <unistd.h>
++#include <xf86drm.h>
+ #include "Headless.hpp"
+ 
+ // ... existing includes remain ...
+ 
+@@ -120,18 +124,90 @@ eBackendType Aquamarine::CHeadlessBackend::type() {
+     return eBackendType::AQ_BACKEND_HEADLESS;
+ }
+ 
+ bool Aquamarine::CHeadlessBackend::start() {
++    // Omakex / WSL: attach a DRM fd so CBackend can build CGBMAllocator.
++    // Prefer explicit path, else /dev/dri/card0 (vgem primary; dumb BO works).
++    const char* enabled = getenv("OMAKEX_VGEM");
++    if (!enabled)
++        enabled = getenv("AQ_WSL_VGEM");
++    if (enabled && enabled[0] != '\0' && enabled[0] != '0') {
++        const char* card = getenv("OMAKEX_DRM_CARD");
++        if (!card || !*card)
++            card = "/dev/dri/card0";
++        m_drmFD = open(card, O_RDWR | O_CLOEXEC);
++        if (m_drmFD < 0) {
++            backend->log(AQ_LOG_ERROR, std::format("headless/omakex: failed to open {}: {}", card, strerror(errno)));
++        } else {
++            backend->log(AQ_LOG_DEBUG, std::format("headless/omakex: using DRM node {} fd={}", card, m_drmFD));
++            char* renderName = drmGetRenderDeviceNameFromFd(m_drmFD);
++            if (renderName) {
++                m_drmRenderFD = open(renderName, O_RDWR | O_CLOEXEC);
++                free(renderName);
++            }
++        }
++    }
+     return true;
+ }
+ 
+ std::vector<SP<SPollFD>> Aquamarine::CHeadlessBackend::pollFDs() {
+     return {makeShared<SPollFD>(timers.timerfd.get(), [this]() { dispatchTimers(); })};
+ }
+ 
+ int Aquamarine::CHeadlessBackend::drmFD() {
+-    return -1;
++    return m_drmFD;
+ }
+ 
+ int Aquamarine::CHeadlessBackend::drmRenderNodeFD() {
+-    return -1;
++    return m_drmRenderFD >= 0 ? m_drmRenderFD : m_drmFD;
+ }
