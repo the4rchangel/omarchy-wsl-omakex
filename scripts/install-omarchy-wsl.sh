@@ -92,7 +92,7 @@ sudo pacman -S --noconfirm --needed \
   hyprland aquamarine wayvnc seatd \
   mesa vulkan-swrast libglvnd \
   xorg-xwayland xdg-desktop-portal-hyprland xdg-desktop-portal-gtk \
-  omarchy quickshell foot nautilus \
+  omarchy quickshell foot ghostty ghostty-terminfo ghostty-shell-integration nautilus \
   noto-fonts noto-fonts-emoji ttf-jetbrains-mono-nerd woff2-font-awesome \
   gnome-themes-extra yaru-icon-theme \
   grim slurp wl-clipboard \
@@ -134,13 +134,26 @@ hl.config({
 LUA
 fi
 
-# Theme
+# Seed app configs (terminal themes include → current/theme/*.conf)
 export PATH="/usr/share/omarchy/bin:$PATH"
+for app in ghostty foot alacritty; do
+  if [[ -d /usr/share/omarchy/config/$app && ! -e "$HOME/.config/$app" ]]; then
+    cp -Rpf "/usr/share/omarchy/config/$app" "$HOME/.config/"
+  fi
+done
+mkdir -p "$HOME/.config"
+printf '%s\n' \
+  '# Terminal emulator preference order for xdg-terminal-exec' \
+  'com.mitchellh.ghostty.desktop' \
+  'foot.desktop' >"$HOME/.config/xdg-terminals.list"
+
+# Theme (wires Tokyo Night into ghostty/foot/hypr/shell)
 if command -v omarchy-theme-set >/dev/null; then
   log "Setting Tokyo Night theme"
   OMARCHY_THEME_HEADLESS=1 OMARCHY_SETUP_CONTEXT=iso-chroot \
     omarchy-theme-set "Tokyo Night" || warn "theme-set failed"
 fi
+command -v omarchy-default-terminal >/dev/null && omarchy-default-terminal ghostty || true
 
 # Shell PATH
 grep -q OMARCHY_PATH "$HOME/.bashrc" 2>/dev/null || cat >>"$HOME/.bashrc" <<'B'
