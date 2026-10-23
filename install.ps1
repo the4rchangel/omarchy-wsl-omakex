@@ -10,7 +10,7 @@
   4. Optionally installs TigerVNC Viewer via winget
 
 .EXAMPLE
-  git clone https://github.com/<you>/omarchy-wsl-omakex.git
+  git clone https://github.com/the4rchangel/omarchy-wsl-omakex.git
   cd omarchy-wsl-omakex
   Set-ExecutionPolicy -Scope Process Bypass
   .\install.ps1
