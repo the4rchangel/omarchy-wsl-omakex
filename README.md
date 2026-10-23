@@ -8,6 +8,23 @@ Stock Hyprland cannot start on WSL (no real KMS). This project patches **Aquamar
 
 > Rendering is **CPU / llvmpipe** — fine for a daily desktop shell, not for games.
 
+## vs [Try Omarchy for Windows](https://github.com/omacom/try-omarchy-windows)
+
+Basecamp’s official **[try-omarchy-windows](https://github.com/omacom/try-omarchy-windows)** runs Omarchy in a **QEMU/WHPX VM**. That is the better “full machine” desktop: closer to bare-metal Omarchy, proper GPU path, and a real guest OS. Prefer that if you want Omarchy as your primary Windows-side Linux GUI.
+
+This repo is for people who live in **WSL + Windows Terminal** and want Omarchy *alongside* that workflow:
+
+| Prefer **omarchy-wsl-omakex** when… | Prefer **try-omarchy-windows** when… |
+|------------------------------------|-------------------------------------|
+| You’re CLI-first — open `wsl -d omarchy` for a shell **without** starting a GUI | You want a full Omarchy desktop as the main experience |
+| You only open the GUI sometimes (`omakex` / KeX-style) | You always want the DE up, like a normal PC |
+| You need **native Windows disk access** (`/mnt/c`, `/mnt/d`, edit repo on `C:` from Neovim in WSL) | You’re fine with shared folders / guest mounts |
+| You want Omarchy as a **Windows Terminal profile** next to Ubuntu/Kali | A separate VM window is fine |
+| You already use WSL tooling (git, gh, Docker Desktop/WSL, VS Code Remote-WSL) | You want isolation from the Windows host |
+| You want a light install (no VM image download / WHPX tuning) | You want the closest thing to “real” Omarchy graphics |
+
+**Honest tradeoff:** the VM is the better *desktop*. WSL here is the better *dev/terminal companion* that can still pop the Omarchy UI when you want it.
+
 ## Windows install (recommended)
 
 **Requirements:** Windows 10/11 with **WSL2**, plus any one existing distro (e.g. Ubuntu) used only to bootstrap Arch.
@@ -108,7 +125,7 @@ sudo cmake --install build/aquamarine/build && sudo ldconfig
 
 Proven end-to-end on WSL2 (Microsoft kernel with vgem): Omarchy bar + Tokyo Night + wayvnc + TigerVNC.
 
-**Out of scope:** GPU Hyprland via `/dev/dxg`. Official native Windows path remains [try-omarchy-windows](https://github.com/omacom/try-omarchy-windows) (QEMU).
+**Out of scope:** GPU Hyprland via `/dev/dxg`. For a fuller GPU desktop on Windows, use [try-omarchy-windows](https://github.com/omacom/try-omarchy-windows).
 
 ## License
 
